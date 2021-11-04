@@ -5,10 +5,14 @@ deps = $(wildcard utils/*.h *.h *.cpp)
 
 target=drl
 
-All: $(target)
+All: $(target) query
 
 $(target): $(deps)
 	$(CCOMPILE) run.cpp $(LIB) $(LDFLAGS) $(CPPFLAGS) -o $(target)
 
+query:query.cpp
+	g++ $^ $(CPPFLAGS) -o $@
+
 clean:
 	rm $(target)
+	rm query

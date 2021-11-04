@@ -11,5 +11,14 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib64/mpich/lib
 make clean
 make
 
-#create index
-mpiexec -n 2 ./drl -if example/graph -O 4
+#create folder to store index
+mkdir example/index
+#create index, args:
+# -if: directory to the input graph
+# -of: directory for storing index
+mpiexec -n 2 ./drl -if example/graph -of example/index
+
+#process queries, args:
+# arg0: directory to the index files
+# arg1: path to the queries
+./query example/index example/queries.txt

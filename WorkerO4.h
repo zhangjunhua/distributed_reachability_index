@@ -612,7 +612,7 @@ class Worker {
     StopTimer(WORKER_TIMER);
     if (me == MASTER_RANK) {
 //                cout << "Input: " << setting::inputFileDirectory << endl;
-      PrintTimer("Graph Load Time", WORKER_TIMER);
+      printf("graph loaded.\n");
     }
     worker_barrier();
     //=========================================================
@@ -718,108 +718,39 @@ class Worker {
 //				if (me == MASTER_RANK) record("index size is %lu.", idxsize)
 
       if (me == MASTER_RANK) {
-        record(
-            "runtime=%f, transfertime=%f, idx_size=%lu, #gmsg=%lu, inAgentCnt=%u, ouAgentCnt=%u, avgAgentCnt=%f",
+        printf(
+            "runtime=%f, transfertime=%f, idx_size=%lu, inAgentCnt=%u, ouAgentCnt=%u, avgAgentCnt=%f\n",
             runtime,
             get_timer(TRANSFER_TIMER),
             idxsize,
-            global_gmsg_num,
             pstat.inAgentCnt,
             pstat.ouAgentCnt,
-            (pstat.inAgentCnt + pstat.ouAgentCnt) / (2.0 * global_vnum))
+            (pstat.inAgentCnt + pstat.ouAgentCnt) / (2.0 * global_vnum));
       }
 
     }
 //    report_graph();
 //            worker_barrier();
 //            diff();
-    output_status();
+//    output_status();
   }
 
-  void report_graph() {
-    ostringstream oss;
-    oss << "====================graph===================" << endl;
-    for (Vertex &v:vertexes) {
-      oss << "id:" << v.id << " order:" << v.level << " in:{";
-
-      oss << "====================ghost=================" << endl;
-      for (auto &e:in_ghosts) {
-        oss << e.first << " ing{";
-        for (auto &e1:e.second) {
-          oss << e1 << ",";
+  void save_index() {
+    if (!setting::outputFileDirectory.empty()) {
+      ofstream oss(setting::outputFileDirectory + "/index.part" + to_string(me));
+      for (Vertex &v:vertexes) {
+        oss << v.id << " " << v.level << " ";
+        oss << v.ilb.size() << " ";
+        for (NODETYPE n:v.ilb) {
+          oss << n << " ";
         }
-        oss << "}" << endl;
-      }
-
-      for (auto &e:out_ghosts) {
-        oss << e.first << " oug{";
-        for (auto &e1:e.second) {
-          oss << e1 << ",";
-        }
-        oss << "}" << endl;
-      }
-    }
-    cout << oss.str() << endl;
-  }
-  void output_status() {
-
-    ostringstream oss;
-
-    oss << "====================index=================" << endl;
-    for (Vertex &v:vertexes) {
-      oss << v.id << " " << v.level << " ilb:{";
-      for (NODETYPE n:v.ilb) {
-        oss << n << ",";
-      }
-      oss << "} olb:{";
-      for (NODETYPE n:v.olb) {
-        oss << n << ",";
-      }
-      oss << "}" << endl;
-    }
-
-    cout << oss.str();
-  }
-
-  void diff() {
-    string basename = "/data/junhzhan/drlData/citeseer/citeseer.VBDuL.parts/citeseer";
-    vector<vector<NODE_TYPE >> graph, rgraph;
-    vector<NODE_TYPE> level;
-    load_VBDuL_graph_parts(graph, rgraph, level, basename);
-    double time_now = get_current_time();
-    pair<vector<vector<NODE_TYPE >>, vector<vector<NODE_TYPE >>> idx =
-        butterfly::butterfly(graph, rgraph, level);
-    cout << "time" << get_current_time() - time_now << endl;
-    ostringstream oss;
-    for (NODETYPE level = 0; level < vertexes.size(); level++) {
-      size_t i = lvl_v_idx[level];
-      if (vertexes[i].ilb.size() != idx.first[i].size() || vertexes[i].olb.size() != idx.second[i].size()) {
-        oss << "diff of (v,l) (" << i << "," << level << ") ";
-        if (vertexes[i].ilb.size() != idx.first[i].size()) {
-          oss << " drl.ilb: ";
-          for (auto a:vertexes[i].ilb)oss << a << ",";
-          oss << " bty.lin: ";
-          for (auto a:idx.first[i])oss << a << ",";
-        }
-        if (vertexes[i].olb.size() != idx.second[i].size()) {
-          oss << " drl.olb: ";
-          for (auto a:vertexes[i].olb)oss << a << ",";
-          oss << " bty.lou: ";
-          for (auto a:idx.second[i])oss << a << ",";
+        oss << v.olb.size() << " ";
+        for (NODETYPE n:v.olb) {
+          oss << n << " ";
         }
         oss << endl;
-        break;
-      } else {
-        for (int j = 0; j < vertexes[i].ilb.size(); ++j) {
-          assert(vertexes[i].ilb[j] == idx.first[i][j]);
-        }
-        for (int j = 0; j < vertexes[i].olb.size(); ++j) {
-          assert(vertexes[i].olb[j] == idx.second[i][j]);
-        }
       }
-
     }
-    cout << oss.str();
   }
 
  private:
@@ -840,6 +771,7 @@ class Worker {
 void build_indexes() {
   Worker worker;
   worker.run();
+  worker.save_index();
 }
 
 }

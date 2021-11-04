@@ -61,7 +61,7 @@ int main(int argc, char *argv[]) {
   } else {
     setting::outputFileDirectory = "";
     if (MASTER_RANK == me) {
-      cout << "warn: no output file dir specified." << endl;
+      cout << "warning: no output file dir specified." << endl;
     }
   }
 

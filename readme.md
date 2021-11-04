@@ -5,5 +5,5 @@ source code for distributed reachability labeling
 # run the demo
 
 ``
-./compile_runDemo.sh
+sh compile_runDemo.sh
 ``
