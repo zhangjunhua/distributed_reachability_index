@@ -1,33 +1,28 @@
-#ifndef WORKER_HO4m1
-#define WORKER_HO4m1
-
-/**
- * this version of code implements the no batch version of Outer&Inner partial pruning algorithm
- *
- */
+#ifndef WORKER_HO4
+#define WORKER_HO4
 
 #include <vector>
 #include <fstream>
-#include "../utils/global.h"
+#include "utils/global.h"
 #include <string>
-#include "../utils/serialization.h"
-#include "../utils/communication.h"
-#include "../utils/Combiner.h"
-#include "../utils/Aggregator.h"
-#include "../utils/GraphIO.h"
+#include "utils/serialization.h"
+#include "utils/communication.h"
+#include "utils/Combiner.h"
+#include "utils/Aggregator.h"
+#include "utils/GraphIO.h"
 #include <thread>
 #include <sstream>
-#include "../utils/hash_set.h"
-#include "../utils/settings.h"
-
-#include "../utils/butterfly.h"
+#include "utils/hash_set.h"
+#include "utils/settings.h"
+#include "utils/statistics.h"
+#include "utils/butterfly.h"
 //#include "../../butterfly/lib/graph_io.h"
 //#include "../../butterfly/lib/butterfly.h"
 
 #define NONE                 "\e[0m"
 #define L_GREEN              "\e[1;32m"
 using namespace std;
-namespace O4m1 {
+namespace O4 {
 	
 	NODETYPE vid2idx(NODETYPE vid) {
 		return vid / np;
@@ -91,6 +86,7 @@ namespace O4m1 {
 		
 		NODETYPE id;
 		NODETYPE level;
+//        map<NODETYPE, bool> ist, ost;
 	};
 	
 	obinstream &operator>>(obinstream &obs, Vertex &v) {
@@ -114,6 +110,14 @@ namespace O4m1 {
 	struct mirror_vertex {
 		mirror_vertex() {}
 		
+		mirror_vertex(NODETYPE id, vector<NODETYPE> &in, vector<NODETYPE> &ou) : id(id), in(in), out(ou) {}
+		
+		void
+		set(NODETYPE id1, const vector<NODETYPE> &in1, const vector<NODETYPE> &out1) { id = id1, in = in1, out = out1; }
+		
+		NODETYPE id;
+		vector<NODETYPE> in;
+		vector<NODETYPE> out;
 		vector<NODETYPE> inBL, ouBL;
 	};
 	
@@ -122,9 +126,24 @@ namespace O4m1 {
 	vector<mirror_vertex> mir;
 	
 	
+	ibinstream &operator<<(ibinstream &m, const mirror_vertex &v) {
+		m << v.id;
+		m << v.in;
+		m << v.out;
+		return m;
+	}
+	
+	obinstream &operator>>(obinstream &m, mirror_vertex &v) {
+		m >> v.id;
+		m >> v.in;
+		m >> v.out;
+		return m;
+	}
+	
+	
 	class Worker {
 	public:
-		Worker() : forward_gmsg(np), backward_gmsg(np) {}
+		Worker() : forward_gmsg(np), backward_gmsg(np), oidx_msg(np), iidx_msg(np), oidx_bin(np), iidx_bin(np) {}
 		
 		void preprocess() {
 			//building vertex.im(om) data structure.
@@ -176,17 +195,70 @@ namespace O4m1 {
 				for (size_t i = 0; i < v.om.size(); ++i) {
 					if (v.oml[i] >= batch_begin_lvl) {
 						forward_gmsg[v.om[i]].emplace_back(v.id, level);
+						if (!share_before_batch && v.om[i] != me && !oidx_bin[v.om[i]][level]) {
+							oidx_msg[v.om[i]].emplace_back(level);
+							oidx_bin[v.om[i]][level] = true;
+						}
 					}
 				}
 			} else {
 				for (size_t i = 0; i < v.im.size(); ++i) {
 					if (v.iml[i] >= batch_begin_lvl) {
 						backward_gmsg[v.im[i]].emplace_back(v.id, level);
+						if (!share_before_batch && v.im[i] != me && !iidx_bin[v.im[i]][level]) {
+							iidx_msg[v.im[i]].emplace_back(level);
+							iidx_bin[v.im[i]][level] = true;
+						}
 					}
 				}
 			}
 		}
 		
+		
+		void sync_label_msgs() {
+			vector<ibinstream> ibss(np);
+			//serialization
+			for (int peer = 0; peer < np; ++peer) {
+				if (peer != me) {
+					ibss[peer] << oidx_msg[peer].size();
+					for (size_t i = 0; i < oidx_msg[peer].size(); i++) {
+						ibss[peer] << oidx_msg[peer][i] << mir[oidx_msg[peer][i]].out;
+						oidx_bin[peer][oidx_msg[peer][i]] = false;
+					}
+					oidx_msg[peer].clear();
+//                    oidx_msg[peer].shrink_to_fit();
+					
+					ibss[peer] << iidx_msg[peer].size();
+					for (size_t i = 0; i < iidx_msg[peer].size(); i++) {
+						ibss[peer] << iidx_msg[peer][i] << mir[iidx_msg[peer][i]].in;
+						iidx_bin[peer][iidx_msg[peer][i]] = false;
+					}
+					iidx_msg[peer].clear();
+//                    iidx_msg[peer].shrink_to_fit();
+				}
+			}
+			//transfer
+			vector<obinstream> obss = exchange_bin_data(ibss);
+			size_t size;
+			NODETYPE id;
+			//deserialization
+			for (int peer = 0; peer < np; ++peer) {
+				if (peer != me) {
+					obss[peer] >> size;
+					for (size_t i = 0; i < size; ++i) {
+						obss[peer] >> id;
+						mir[id].id = id;
+						obss[peer] >> mir[id].out;
+					}
+					obss[peer] >> size;
+					for (size_t i = 0; i < size; ++i) {
+						obss[peer] >> id;
+						mir[id].id = id;
+						obss[peer] >> mir[id].in;
+					}
+				}
+			}
+		}
 		
 		void batch_begin_compute() {
 			map<NODETYPE, NODETYPE>::iterator it = lvl_v_idx.lower_bound(batch_begin_lvl);
@@ -196,10 +268,19 @@ namespace O4m1 {
 				broadcast(v, inBatchLevel(v.level), false);
 			}
 			
+			if (!share_before_batch) {
+				sync_label_msgs();
+			}
 			Ibin_all_to_all_64(forward_gmsg);
 			Ibin_all_to_all_64(backward_gmsg);
 		}
 		
+		inline void status_update(NODETYPE idx) {
+			if (!post_batch_bin[idx]) {
+				post_batch_bin[idx] = true;
+				post_batch_idx.emplace_back(idx);
+			}
+		}
 		
 		void batch_msg_compute() {
 			vector<vector<pair<NODETYPE, NODETYPE >>> _forward_gmsg(np), _backward_gmsg(np);
@@ -212,7 +293,9 @@ namespace O4m1 {
 					for (NODETYPE idx:out_ghosts[msg.first]) {
 						Vertex &v = vertexes[idx];
 						if (v.level <= msglevel)continue;//pruning
+						
 						if (v.iVisit.find(msg.second))continue;//has visited
+						if (set_intersection(v.ilb, mir[msg.second].out))continue;//prune with pre batch partial label
 						if (v.iVisit.intersection(mir[msg.second].ouBL))continue;//prune by batch partial label
 						
 						if (v.level < batch_end_lvl) {//if it is in current batch.
@@ -220,6 +303,7 @@ namespace O4m1 {
 						}
 						
 						v.iVisit.insert(msg.second);
+						status_update(idx);
 						broadcast(v, msg.second, true);
 					}
 				}
@@ -235,6 +319,7 @@ namespace O4m1 {
 						if (v.level <= msglevel)continue;//pruning
 						
 						if (v.oVisit.find(msg.second))continue;//has visited
+						if (set_intersection(v.olb, mir[msg.second].in))continue;//prune with pre batch partial label
 						if (v.oVisit.intersection(mir[msg.second].inBL))continue;//prune by batch partial label
 						
 						if (v.level < batch_end_lvl) {//in current batch
@@ -242,12 +327,15 @@ namespace O4m1 {
 						}
 						
 						v.oVisit.insert(msg.second);
+						status_update(idx);
 						broadcast(v, msg.second, false);
 					}
 				}
 			}
 			_backward_gmsg.clear(), _backward_gmsg.shrink_to_fit();
 			
+			if (!share_before_batch)
+				sync_label_msgs();
 			share_inc_Batch_reach_info();
 			Ibin_all_to_all_64(forward_gmsg);
 			Ibin_all_to_all_64(backward_gmsg);
@@ -269,8 +357,54 @@ namespace O4m1 {
 		}
 		
 		
+		/**
+		 * prepare the indexes of vertexes in current batch
+		 */
+		void prebatch() {
+			mir.resize(batch_end_lvl - batch_begin_lvl);
+			for (int i = 0; i < batch_end_lvl - batch_begin_lvl; i++) {
+				mir[i].id = -1;
+				mir[i].in.clear(), mir[i].in.shrink_to_fit();
+				mir[i].out.clear(), mir[i].out.shrink_to_fit();
+				mir[i].inBL.clear(), mir[i].inBL.shrink_to_fit();
+				mir[i].ouBL.clear(), mir[i].ouBL.shrink_to_fit();
+			}
+			
+			
+			if (share_before_batch) {
+				vector<mirror_vertex> to_send;
+				for (map<NODETYPE, NODETYPE>::iterator it = lvl_v_idx.lower_bound(batch_begin_lvl);
+				     it != lvl_v_idx.end() && it->first < batch_end_lvl; ++it) {
+					Vertex &v = vertexes[it->second];
+					to_send.emplace_back(inBatchLevel(v.level), v.ilb, v.olb);
+				}
+				
+				vector<mirror_vertex> to_get;
+				all_to_all_Ibcast<mirror_vertex>(to_send, to_get);
+				
+				for (int i = 0; i < to_get.size(); i++) {
+					swap(mir[to_get[i].id], to_get[i]);
+				}
+				for (int i = 0; i < to_send.size(); i++) {
+					swap(mir[to_send[i].id], to_send[i]);
+				}
+			} else {
+				for (map<NODETYPE, NODETYPE>::iterator it = lvl_v_idx.lower_bound(batch_begin_lvl);
+				     it != lvl_v_idx.end() && it->first < batch_end_lvl; ++it) {
+					Vertex &v = vertexes[it->second];
+					mir[inBatchLevel(v.level)].set(inBatchLevel(v.level), v.ilb, v.olb);
+				}
+				for (int i = 0; i < np; i++) {
+					if (i != me) {
+						oidx_bin[i].resize(batch_end_lvl - batch_begin_lvl);
+						iidx_bin[i].resize(batch_end_lvl - batch_begin_lvl);
+					}
+				}
+			}
+		}
+		
 		void postbatch() {
-			for (NODETYPE idx = 0; idx < vertexes.size(); ++idx) {
+			for (NODETYPE idx:post_batch_idx) {
 				Vertex &v = vertexes[idx];
 				vector<NODETYPE> &oVec = v.oVisit.release_data();
 				vector<NODETYPE> tmpl;
@@ -293,7 +427,17 @@ namespace O4m1 {
 				v.iVisit.clear();
 				sort(tmpl.begin(), tmpl.end());
 				v.ilb.insert(v.ilb.end(), tmpl.begin(), tmpl.end());
+				
+				post_batch_bin[idx] = false;
 			}
+			post_batch_idx.clear();
+			if (MASTER_RANK == me) {
+				for (const auto &m:mir) {
+					pstat.ouAgentCnt += m.ouBL.size();
+					pstat.inAgentCnt += m.inBL.size();
+				}
+			}
+//            post_batch_idx.shrink_to_fit();
 		}
 		
 		vector<centralized_vertex> load_bin_graph() {
@@ -407,60 +551,94 @@ namespace O4m1 {
 			//=========================================================
 			init_timers();
 			ResetTimer(WORKER_TIMER);
+			post_batch_bin.resize(vertexes.size(), false);
 			runtime = get_current_time();
 			ResetTimer(TRANSFER_TIMER);
-			
 			
 			global_step_num = 0;
 			
 			uint64_t step_gmsg_num = 0;
+			uint64_t bat_gmsg_num = 0;
 			uint64_t global_gmsg_num = 0;
 			
 			//initializations
 			batch = 0;
+			Bsize = setting::ini_Bsize;
 			batch_begin_lvl = 0;
 			ResetTimer(PRE_BATCH_TIMER);
-			
-			//prebatch goes here
-			ResetTimer(BATCH_TIMER);
-			batch_end_lvl = batch_begin_lvl + global_vnum;
-			StartTimer(PRE_BATCH_TIMER);
-			mir.resize(batch_end_lvl - batch_begin_lvl);
-			StopTimer(PRE_BATCH_TIMER);
-			
-			batch_first_supstep = true;
 			while (true) {
-				global_step_num++;
-				ResetTimer(SUPER_STEP_TIMER);
-				if (batch_first_supstep)
-					batch_begin_compute();
-				else
-					batch_msg_compute();
+				//prebatch goes here
+				ResetTimer(BATCH_TIMER);
+				batch_end_lvl = batch_begin_lvl + Bsize;
+				StartTimer(PRE_BATCH_TIMER);
+				prebatch();
+				StopTimer(PRE_BATCH_TIMER);
 				
-				step_gmsg_num = 0;
-				
-				for (NODETYPE i = 0; i < np; i++) {
-					step_gmsg_num += forward_gmsg[i].size();
-					step_gmsg_num += backward_gmsg[i].size();
+				bat_gmsg_num = 0;
+				batch_first_supstep = true;
+				while (true) {
+					global_step_num++;
+					ResetTimer(SUPER_STEP_TIMER);
+					if (batch_first_supstep)
+						batch_begin_compute();
+					else
+						batch_msg_compute();
+					
+					step_gmsg_num = 0;
+					
+					for (NODETYPE i = 0; i < np; i++) {
+						step_gmsg_num += forward_gmsg[i].size();
+						step_gmsg_num += backward_gmsg[i].size();
+					}
+					step_gmsg_num = all_sum_LL(step_gmsg_num);
+					bat_gmsg_num += step_gmsg_num;
+					global_gmsg_num += step_gmsg_num;
+					
+					StopTimer(SUPER_STEP_TIMER);
+//                    if (me == MASTER_RANK) {
+//                        cout << "step " << global_step_num << " done. gmsgs#" << step_gmsg_num << " Time elapsed: "
+//                             << get_timer(SUPER_STEP_TIMER) << " seconds" << endl;
+//                    }
+					if (step_gmsg_num == 0)break;
+					batch_first_supstep = false;
 				}
-				step_gmsg_num = all_sum_LL(step_gmsg_num);
-				global_gmsg_num += step_gmsg_num;
+				//postbatch goes here
+				postbatch();
+				StopTimer(BATCH_TIMER);
+
+//                if (me == MASTER_RANK) {
+//                    printf(L_GREEN "Batch %d of [%d,%d) with gmsg#%lu in sb(%d) done in %f seconds.\n" NONE, batch,
+//                           batch_begin_lvl, batch_end_lvl, bat_gmsg_num, share_before_batch,
+//                           get_timer(BATCH_TIMER));
+//                }
 				
-				StopTimer(SUPER_STEP_TIMER);
-				if (step_gmsg_num == 0)break;
-				batch_first_supstep = false;
+				if (share_before_batch) {
+//                    if (np * Bsize >= bat_gmsg_num * 2 && batch_end_lvl > (global_vnum / 4)) {
+					if (np * Bsize >= bat_gmsg_num * 2) {
+						share_before_batch = false;
+					}
+				}
+				
+				batch_begin_lvl = batch_end_lvl;
+				if (batch_begin_lvl >= global_vnum) {
+					break;
+				}
+				batch++;
+				
+				Bsize = Bsize * setting::Batch_grow_factor;
+				if (Bsize > setting::max_Bsize)
+					Bsize = setting::max_Bsize;
 			}
-			//postbatch goes here
-			postbatch();
 			
 			
 			StopTimer(WORKER_TIMER);
 			runtime = get_current_time() - runtime;
-//            if (me == MASTER_RANK) {
-//                record("runtime is %f", runtime)
-//                cout << "Total gmsgs#" << global_gmsg_num << endl;
-//            }
-			
+//			if (me == MASTER_RANK) record("runtime is %f", runtime)
+//            PrintTimer("Total Computational Time", WORKER_TIMER);
+//            PrintTimer("Total Pre_Batch Time", PRE_BATCH_TIMER);
+//			if (me == MASTER_RANK) {
+//				cout << "Total gmsgs#" << global_gmsg_num << endl;
+//			}
 			worker_barrier();
 
 //        dump_partition(params.output_path);
@@ -471,12 +649,20 @@ namespace O4m1 {
 					idxsize += v.olb.size();
 				}
 				idxsize = master_sum_LL(idxsize);
-				if (me == MASTER_RANK) record(
-						"runtime=%f, transfertime=%f, idx_size=%lu, #gmsg=%lu",
-						runtime,
-						get_timer(TRANSFER_TIMER),
-						idxsize,
-						global_gmsg_num)
+//				if (me == MASTER_RANK) record("index size is %lu.", idxsize)
+				
+				if (me == MASTER_RANK) {
+					record(
+							"runtime=%f, transfertime=%f, idx_size=%lu, #gmsg=%lu, inAgentCnt=%u, ouAgentCnt=%u, avgAgentCnt=%f",
+							runtime,
+							get_timer(TRANSFER_TIMER),
+							idxsize,
+							global_gmsg_num,
+							pstat.inAgentCnt,
+							pstat.ouAgentCnt,
+							(pstat.inAgentCnt + pstat.ouAgentCnt) / (2.0 * global_vnum))
+				}
+				
 			}
 //            worker_barrier();
 //            diff();
@@ -575,8 +761,12 @@ namespace O4m1 {
 	private:
 		vector<Vertex> vertexes;
 		hash_map<NODETYPE, vector<NODETYPE>> out_ghosts, in_ghosts; //vid->nbs's idx
+		vector<bool> post_batch_bin;
+		vector<NODETYPE> post_batch_idx;
 		
 		vector<vector<pair<NODETYPE, NODETYPE >>> forward_gmsg, backward_gmsg;
+		vector<vector<NODETYPE>> oidx_msg, iidx_msg;
+		vector<vector<bool>> oidx_bin, iidx_bin;
 		
 		vector<pair<NODETYPE, NODETYPE>> in_inc_label, ou_inc_label;
 		
@@ -585,10 +775,9 @@ namespace O4m1 {
 	
 	
 	void build_indexes() {
-//        log_general("O4m1 building indexes.")
 		Worker worker;
 		worker.run();
 	}
 	
 }
-#endif //WORKER_HO4m1
+#endif //WORKER_HO4
