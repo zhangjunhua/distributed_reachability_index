@@ -24,3 +24,4 @@ add_executable(dist_reach run.cpp
         utils/vecs.h utils/ydhdfs.h utils/ydhdfs1.h utils/ydhdfs2.h utils/CmdOptsParser.h
         utils/GraphIO.h utils/hash_set.h
         WorkerO4.h utils/statistics.h)
+add_executable(test test.cpp)
